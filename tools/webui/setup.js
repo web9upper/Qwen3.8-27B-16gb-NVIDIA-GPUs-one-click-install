@@ -202,6 +202,51 @@ function renderVisionChoice(menu) {
   });
 }
 
+async function setGpu(index) {
+  // Its own endpoint, like /setup/vision: a setting written the moment it is
+  // chosen, no install behind it. Chosen is cleared because the menu below is
+  // re-planned for the newly chosen card's VRAM.
+  const btns = document.querySelectorAll("[data-gpu]");
+  btns.forEach((b) => { b.disabled = true; });
+  try {
+    ui.chosen = null;
+    apply(await post("/setup/gpu", { index }));
+  } catch (e) {
+    toast(e.message);
+    btns.forEach((b) => { b.disabled = false; });
+  }
+}
+
+function renderGpuChoice(probe) {
+  const card = $("#gpu-card");
+  const wrap = $("#gpu-opts");
+  const gpus = probe.gpus || [];
+  if (gpus.length < 2) { card.classList.add("hidden"); return; }
+  card.classList.remove("hidden");
+  $("#gpu-note").textContent =
+    "The model loads onto one card at a time. Pick which one should run it - "
+    + "the card with the most free memory is usually the right choice. The "
+    + "choice is saved as GPU_INDEX in .env.";
+  wrap.innerHTML = gpus.map((g) => {
+    const note = g.support === "unsupported" ? "cannot run the model"
+      : g.support === "slow" ? "runs, but slower than newer cards"
+        : "";
+    const arch = g.arch && g.arch !== "unknown" ? " - " + g.arch : "";
+    return `<button class="s-opt" type="button" data-gpu="${g.index}"
+        aria-pressed="${g.current ? "true" : "false"}">
+      <span class="dot" aria-hidden="true"></span>
+      <span class="who">
+        <b>GPU ${esc(g.index)} - ${esc(g.name)}</b>
+        <small>${esc(g.vram_gib.toFixed(0))} GB VRAM${esc(arch)}${note ? " - " + esc(note) : ""}</small>
+      </span>
+      <span class="num">${g.current ? "<b>in use</b>" : ""}</span>
+    </button>`;
+  }).join("");
+  wrap.querySelectorAll("[data-gpu]").forEach((b) => {
+    b.onclick = () => setGpu(Number(b.dataset.gpu));
+  });
+}
+
 function renderOptions(menu) {
   const wrap = $("#opts");
   const opts = menu.options || [];
@@ -375,6 +420,7 @@ function apply(state) {
     $("#go").disabled = false;
     renderFacts(state.probe || {});
     renderBlockers(state.probe || {});
+    renderGpuChoice(state.probe || {});
     renderOptions(state.menu || {});
   } else if (phase === "install") {
     show("install");
@@ -468,7 +514,7 @@ function listen() {
     } else if (e.type === "download") {
       if (ui.state) ui.state.download = e.download;
       renderDownload(e.download || {});
-    } else if (e.type === "phase" || e.type === "chose") {
+    } else if (e.type === "phase" || e.type === "chose" || e.type === "gpu") {
       apply(e.state);
     }
   };

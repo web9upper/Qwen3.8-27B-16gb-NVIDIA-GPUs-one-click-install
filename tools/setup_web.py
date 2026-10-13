@@ -192,6 +192,15 @@ class Setup:
         self.cfg["UI"] = mode
         self._emit("ui", ui=mode, state=self.state())
 
+    def set_gpu(self, index: int) -> None:
+        """Which card runs the model. Like set_ui, this is a setting written the
+        moment it is chosen: nothing installs. It re-plans the machine probe and
+        the menu, because both depend on the chosen card's VRAM."""
+        self.cfg = core.set_gpu(self.cfg, int(index))
+        self.probe_data = core.probe(self.cfg)
+        self.menu = core.options_for(self.cfg, 0.0, getattr(self, "want_vision", None))
+        self._emit("gpu", gpu_index=int(index), state=self.state())
+
     # --------------------------------------------------------------- flow --
     _KEEP = object()          # "leave the images answer as it is"
 
@@ -492,6 +501,16 @@ def make_handler(setup: Setup):
                     # skips the machine probe that refresh has to do.
                     want = body.get("vision", None)
                     setup.set_vision(None if want is None else bool(want))
+                    return self._json(setup.state())
+                if path == "/setup/gpu":
+                    # Same shape as /setup/vision and /setup/ui: a setting
+                    # written the moment it is chosen. The probe is re-read
+                    # because the menu is planned for the chosen card.
+                    try:
+                        idx = int(body.get("index", 0))
+                    except (TypeError, ValueError):
+                        idx = -1
+                    setup.set_gpu(idx)
                     return self._json(setup.state())
                 if path == "/setup/refresh":
                     setup.refresh()

@@ -32,7 +32,7 @@ at setup, and you can change it any time.
 
 | | |
 | --- | --- |
-| GPU | NVIDIA, 12 GB VRAM or more, compute capability 7.5+ (Turing and newer). 16 GB is the size this kit was built around. |
+| GPU | NVIDIA, 12 GB VRAM or more, compute capability 7.5+ (Turing and newer). 16 GB is the size this kit was built around. On a two-GPU box, setup lets you pick the card ([details](#two-or-more-cards)). |
 | Driver | 570 or newer (the default PyTorch build is cu128). |
 | Python | **3.11 or newer, 64-bit.** The only thing you install by hand. |
 | Node | **22.19+** from [nodejs.org](https://nodejs.org/) (current dsh). Older LTS (20) warns `EBADENGINE` and the chat UI may fail. Without Node, `/v1` still serves; the launcher says what is missing. |
@@ -276,6 +276,26 @@ surprise download.
 The choice is written into `.env` (`MODEL_DIR`, `HF_TARGET_REPO`, `HF_REVISION`,
 `MODEL_ID`, `CONTEXT_SIZE`, `CACHE_QUANT`, `GPU_MEM_GB`, `VISION`) and everything
 downstream follows it.
+
+### Two or more cards
+
+On a machine with more than one NVIDIA GPU, the card is a question asked at
+**every** launch — a numbered list in the terminal (Enter keeps the last choice;
+`windows\start.bat` and `./linux/start.sh` alike), or a **Which graphics card**
+chooser at the top of the setup page during setup. The answer is written to `.env`
+as `GPU_INDEX` (the `nvidia-smi` index; `0` is the first card) and is the default
+next time. Everything that follows uses *that* card's VRAM: the menu, the
+`GPU_MEM_GB` budget and the free-VRAM pre-flight all describe the card you picked,
+not the first one. A background, tray or otherwise unattended start never blocks on
+the question — it keeps the current choice.
+
+The engine runs on one card at a time. Only the model server is restricted to it —
+Windows hands `CUDA_VISIBLE_DEVICES` to that one child process, Linux prefixes the
+`serve_openai.py` command — so the chosen card appears as device `0` to the engine
+while everything else still sees the whole machine. On a single-card machine there
+is nothing to ask.
+
+For the card that was chosen, what it offers depends on that card's VRAM:
 
 | VRAM | what it offers (**bold** = pre-selected) |
 | --- | --- |
@@ -769,6 +789,7 @@ fine. The ones you are most likely to touch:
 | `CONTEXT_SIZE` | set by setup | tokens; must be a multiple of 256 |
 | `CACHE_QUANT` | set by setup | `4` (int4), `8,4`, `none`, or `k,v` |
 | `GPU_MEM_GB` | set by setup | the process's VRAM budget |
+| `GPU_INDEX` | `0` | which card to load on, by nvidia-smi index — `1` for the second GPU on a multi-GPU box. The launcher pins the engine to it and reads *that* card's VRAM for the profile, the budget and the free-VRAM check. On a machine with more than one card the launcher **asks** at every launch (terminal menu or setup page) and remembers the answer. |
 | `VISION` | `auto` | `off` to skip the vision tower |
 | `PORT` | `8888` | the OpenAI API port |
 | `HOST` | `0.0.0.0` | set to `127.0.0.1` to keep `/v1` off your network |

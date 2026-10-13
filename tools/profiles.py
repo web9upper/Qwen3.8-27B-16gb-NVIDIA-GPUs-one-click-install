@@ -412,8 +412,9 @@ def plan(total_gib: float, want_vision: bool | None = None) -> tuple[float, list
 # -------------------------------------------------------------- hardware -----
 
 class GPU:
-    def __init__(self, name="", total_gib=0.0, cc=0.0, driver=""):
-        self.name, self.total_gib, self.cc, self.driver = name, total_gib, cc, driver
+    def __init__(self, name="", total_gib=0.0, cc=0.0, driver="", index=0):
+        self.name, self.total_gib, self.cc, self.driver, self.index = \
+            name, total_gib, cc, driver, index
 
     @property
     def arch(self) -> str:
@@ -429,10 +430,36 @@ class GPU:
         return "pre-Pascal" if c else "unknown"
 
 
-def detect_gpu() -> GPU:
-    """GPU 0 via nvidia-smi: name, total VRAM (GiB), compute capability, driver."""
+def gpu_index() -> int:
+    """Physical nvidia-smi index to read: GPU_INDEX / SIMPLEX_GPU_INDEX, else the
+    first id in CUDA_VISIBLE_DEVICES, else 0. The launcher exports one of these
+    when the user picks a second card; nvidia-smi ignores CUDA_VISIBLE_DEVICES,
+    so every query here also passes the index as `-i` to keep VRAM, profiles and
+    the budget on the card the engine will actually load onto."""
+    raw = (os.environ.get("SIMPLEX_GPU_INDEX")
+           or os.environ.get("GPU_INDEX")
+           or os.environ.get("CUDA_VISIBLE_DEVICES")
+           or "").strip()
+    if not raw and ENV_FILE.is_file():
+        # run standalone (python tools/profiles.py): honor .env directly
+        try:
+            raw = (read_env(ENV_FILE).get("GPU_INDEX") or "").strip()
+        except Exception:                 # noqa: BLE001 - detection still works
+            raw = ""
+    first = raw.split(",")[0].strip()
     try:
-        r = subprocess.run(["nvidia-smi", "--query-gpu=name,memory.total,compute_cap,driver_version",
+        return max(0, int(first))
+    except ValueError:
+        return 0
+
+
+def detect_gpu(index: int | None = None) -> GPU:
+    """The chosen GPU (GPU_INDEX / CUDA_VISIBLE_DEVICES, default 0) via nvidia-smi:
+    name, total VRAM (GiB), compute capability, driver."""
+    idx = gpu_index() if index is None else index
+    sel = ["nvidia-smi", "-i", str(idx)]
+    try:
+        r = subprocess.run(sel + ["--query-gpu=name,memory.total,compute_cap,driver_version",
                             "--format=csv,noheader,nounits"], capture_output=True, text=True, timeout=10)
         if r.returncode == 0 and r.stdout.strip():
             parts = [x.strip() for x in r.stdout.strip().splitlines()[0].split(",")]
@@ -442,19 +469,65 @@ def detect_gpu() -> GPU:
             mib = float(parts[-3])
             name = ",".join(parts[:-3]).strip()
             if mib > 0:
-                return GPU(name, mib / 1024, cc, driver)
+                return GPU(name, mib / 1024, cc, driver, idx)
     except (FileNotFoundError, ValueError, IndexError, subprocess.TimeoutExpired):
         pass
     # older drivers do not know compute_cap: fall back to name + memory only
     try:
-        r = subprocess.run(["nvidia-smi", "--query-gpu=name,memory.total", "--format=csv,noheader,nounits"],
+        r = subprocess.run(sel + ["--query-gpu=name,memory.total", "--format=csv,noheader,nounits"],
                            capture_output=True, text=True, timeout=10)
         if r.returncode == 0 and r.stdout.strip():
             name, mem = [x.strip() for x in r.stdout.strip().splitlines()[0].rsplit(",", 1)]
-            return GPU(name, float(mem) / 1024, 0.0, "")
+            return GPU(name, float(mem) / 1024, 0.0, "", idx)
     except (FileNotFoundError, ValueError, subprocess.TimeoutExpired):
         pass
     return GPU()
+
+
+def detect_gpus() -> list[GPU]:
+    """Every NVIDIA GPU, in nvidia-smi index order (empty when none is readable).
+
+    nvidia-smi lists all cards regardless of CUDA_VISIBLE_DEVICES, which is what
+    the picker needs: the whole set to offer, before one of them is chosen."""
+    try:
+        r = subprocess.run(["nvidia-smi",
+                            "--query-gpu=index,name,memory.total,compute_cap,driver_version",
+                            "--format=csv,noheader,nounits"],
+                           capture_output=True, text=True, timeout=10)
+        if r.returncode == 0 and r.stdout.strip():
+            out: list[GPU] = []
+            for line in r.stdout.strip().splitlines():
+                parts = [x.strip() for x in line.split(",")]
+                if len(parts) < 4:
+                    continue
+                idx = int(parts[0]) if parts[0].isdigit() else len(out)
+                driver = parts[-1]
+                cc = float(parts[-2]) if parts[-2].replace(".", "").isdigit() else 0.0
+                mib = float(parts[-3])
+                name = ",".join(parts[1:-3]).strip()
+                if mib > 0:
+                    out.append(GPU(name, mib / 1024, cc, driver, idx))
+            if out:
+                return out
+    except (FileNotFoundError, ValueError, IndexError, subprocess.TimeoutExpired):
+        pass
+    # older drivers do not know compute_cap: name + memory only, index from order
+    try:
+        r = subprocess.run(["nvidia-smi", "--query-gpu=name,memory.total",
+                            "--format=csv,noheader,nounits"],
+                           capture_output=True, text=True, timeout=10)
+        if r.returncode == 0 and r.stdout.strip():
+            out = []
+            for i, line in enumerate(r.stdout.strip().splitlines()):
+                try:
+                    name, mem = [x.strip() for x in line.rsplit(",", 1)]
+                    out.append(GPU(name, float(mem) / 1024, 0.0, "", i))
+                except ValueError:
+                    continue
+            return out
+    except (FileNotFoundError, ValueError, subprocess.TimeoutExpired):
+        pass
+    return []
 
 
 def gpu_support(g: GPU) -> tuple[str, list[str]]:
@@ -995,6 +1068,60 @@ def ask_start(cfg: dict, auto: bool = False) -> str | None:
     return "no" if ans.startswith("n") else "browser"
 
 
+def _apply_gpu_env(index: int) -> None:
+    """Point this process's GPU detection at `index`, now.
+
+    Only GPU_INDEX is set. CUDA_VISIBLE_DEVICES is deliberately left alone:
+    nvidia-smi ignores it, and the model server gets its own copy from the
+    launcher at spawn time, so detection here never depends on how a given
+    driver treats CUDA_VISIBLE_DEVICES."""
+    os.environ["GPU_INDEX"] = str(index)
+
+
+def ask_gpu(cfg: dict | None = None, auto: bool = False) -> int:
+    """If more than one NVIDIA card is present, ask which one should run the
+    model and write GPU_INDEX. Selects it for this process too.
+
+    Returns the chosen index (0 = first card / nothing to choose). With a single
+    card, an unanswered prompt, or `auto`, it silently keeps the current choice,
+    so an unattended run behaves exactly as before."""
+    gpus = detect_gpus()
+    if len(gpus) < 2 or auto:
+        return gpu_index()
+    cur = gpu_index()
+    if cur not in {g.index for g in gpus}:
+        cur = gpus[0].index               # GPU_INDEX points at a card that is gone
+    print()
+    print(f"  This PC has {len(gpus)} NVIDIA graphics cards. Which should run the model?")
+    print()
+    for i, g in enumerate(gpus, 1):
+        arch = f"  ({g.arch})" if g.cc else ""
+        mark = "   <- last used" if g.index == cur else ""
+        print(f"    {i}  GPU {g.index}: {g.name}{arch}  |  {g.total_gib:.0f} GB VRAM{mark}")
+    print()
+    default = next((i for i, g in enumerate(gpus, 1) if g.index == cur), 1)
+    if not sys.stdin.isatty():
+        return cur
+    while True:
+        ans = timed_input(f"  ? Choose 1-{len(gpus)}   [Enter = {default}, auto in 90s]: ", 90)
+        if ans is None or ans == "":
+            n = default
+        elif ans.isdigit() and 1 <= int(ans) <= len(gpus):
+            n = int(ans)
+        else:
+            print("  type the number of a graphics card")
+            continue
+        chosen = gpus[n - 1]
+        if chosen.index != cur:
+            try:
+                write_env(ENV_FILE, {"GPU_INDEX": str(chosen.index)})
+            except PermissionError:
+                print("  ! could not write .env - using this card for this run only")
+            print(f"  OK  GPU {chosen.index}: {chosen.name}  ({chosen.total_gib:.0f} GB)")
+        _apply_gpu_env(chosen.index)
+        return chosen.index
+
+
 def ask_vision(auto: bool = False, total_gib: float = 0.0) -> bool | None:
     """Ask whether this install needs image input, before the menu is built.
 
@@ -1041,6 +1168,10 @@ def run(force: bool = False, auto: bool = False, vram: float | None = None, list
     cfg = read_env(ENV_FILE)
     if not force and not list_only and cfg.get("PROFILE") and cfg["PROFILE"].lower() != "ask":
         return 0   # already chosen
+    if vram is None:
+        # Which card, before which quant: the menu below is built from the
+        # chosen card's VRAM, so this has to be answered first.
+        ask_gpu(cfg, auto=auto or list_only)
     g = detect_gpu()
     if vram:
         g.total_gib = float(vram)
@@ -1158,6 +1289,11 @@ def pick(auto: bool = False) -> int:
         3  quit; nobody asked for anything to start
     """
     cfg = read_env(ENV_FILE)
+    # Which card is a start-time question too: asked every launch (Enter keeps
+    # the last choice), so it can be changed without a dedicated command. With
+    # no terminal it keeps the current choice silently.
+    if not auto:
+        ask_gpu(cfg)
     g = detect_gpu()
     choice = choose_installed(cfg, auto=auto, g=g)
     if choice is None:

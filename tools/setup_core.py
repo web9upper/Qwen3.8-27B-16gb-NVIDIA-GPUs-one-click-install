@@ -251,8 +251,45 @@ def probe(cfg: dict) -> dict:
         "engine_wheel": engine_wheel,
         "source_build_blockers": [] if engine_wheel else wheels.source_build_blockers(),
         "profile": cfg.get("PROFILE") or "",
+        "gpus": gpu_list(),
+        "gpu_index": profiles.gpu_index(),
         "platform": sys.platform,
     }
+
+
+def gpu_list() -> list[dict]:
+    """Every NVIDIA card, with the support note and which one is selected. The
+    setup page renders this as the 'which card' chooser; a single-card machine
+    gets one row and the page hides the chooser."""
+    import profiles
+    cur = profiles.gpu_index()
+    out = []
+    for g in profiles.detect_gpus():
+        support, notes = profiles.gpu_support(g)
+        out.append({"index": g.index, "name": g.name,
+                    "vram_gib": round(g.total_gib, 1), "cc": g.cc, "arch": g.arch,
+                    "driver": g.driver, "support": support, "notes": notes,
+                    "current": g.index == cur})
+    return out
+
+
+def set_gpu(cfg: dict, index: int) -> dict:
+    """Write GPU_INDEX into .env and select it for this process, so the menu the
+    page rebuilds is planned for the chosen card."""
+    import profiles
+    gpus = {g.index: g for g in profiles.detect_gpus()}
+    if index not in gpus:
+        raise SetupError(f"GPU {index} is not installed.",
+                         "Reload the page - the list is built from this machine.")
+    try:
+        profiles.write_env(ENV_FILE, {"GPU_INDEX": str(index)})
+    except PermissionError as e:
+        raise SetupError("Could not write .env - the file is open in another program.",
+                         "Close any editor holding .env and try again.") from e
+    profiles._apply_gpu_env(index)
+    merged = dict(cfg)
+    merged["GPU_INDEX"] = str(index)
+    return merged
 
 
 def options_for(cfg: dict, vram_gib: float = 0.0, want_vision=None) -> dict:

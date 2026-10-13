@@ -504,10 +504,50 @@ def dflash2_drafter(cfg: dict[str, str]) -> None:
         die(why)
 
 
+def _gpu_index() -> int:
+    """Physical nvidia-smi index the engine is pinned to: GPU_INDEX /
+    SIMPLEX_GPU_INDEX, else the first id in CUDA_VISIBLE_DEVICES, else 0.
+    main() exports these from .env's GPU_INDEX, so every check below reads the
+    same card the engine will load onto (nvidia-smi ignores
+    CUDA_VISIBLE_DEVICES, hence the explicit -i on each query)."""
+    raw = (os.environ.get("SIMPLEX_GPU_INDEX")
+           or os.environ.get("GPU_INDEX")
+           or os.environ.get("CUDA_VISIBLE_DEVICES")
+           or "").strip()
+    first = raw.split(",")[0].strip()
+    try:
+        return max(0, int(first))
+    except ValueError:
+        return 0
+
+
+def apply_gpu_index(cfg: dict[str, str]) -> int:
+    """Resolve .env's GPU_INDEX and export it as GPU_INDEX for this process and
+    the nvidia-smi checks it runs (they ignore CUDA_VISIBLE_DEVICES, so they are
+    told -i with this index instead). Returns the chosen physical index
+    (0 = the default first card).
+
+    This does NOT set CUDA_VISIBLE_DEVICES: that is applied to the model server
+    alone, at spawn, so GPU detection here never depends on how the driver
+    treats CUDA_VISIBLE_DEVICES. Called again after setup, which may rewrite
+    GPU_INDEX from the browser's card chooser."""
+    raw = (cfg.get("GPU_INDEX") or os.environ.get("GPU_INDEX") or "").strip()
+    if raw:
+        os.environ["GPU_INDEX"] = raw
+        first = raw.split(",")[0].strip()
+        try:
+            return max(0, int(first))
+        except ValueError:
+            return 0
+    # No GPU_INDEX: honor an ambient CUDA_VISIBLE_DEVICES if one is set, so a
+    # user who pinned the card that way keeps their choice.
+    return _gpu_index()
+
+
 def nvidia_total_mib() -> int:
     try:
         r = subprocess.run(
-            ["nvidia-smi", "--query-gpu=memory.total", "--format=csv,noheader,nounits"],
+            ["nvidia-smi", "-i", str(_gpu_index()), "--query-gpu=memory.total", "--format=csv,noheader,nounits"],
             capture_output=True, text=True, timeout=10,
         )
         if r.returncode == 0:
@@ -519,9 +559,9 @@ def nvidia_total_mib() -> int:
 
 
 def nvidia_cc_driver() -> tuple[float, int]:
-    """(compute capability, driver major) of GPU 0, or (0, 0)."""
+    """(compute capability, driver major) of the chosen GPU, or (0, 0)."""
     try:
-        r = subprocess.run(["nvidia-smi", "--query-gpu=compute_cap,driver_version",
+        r = subprocess.run(["nvidia-smi", "-i", str(_gpu_index()), "--query-gpu=compute_cap,driver_version",
                             "--format=csv,noheader,nounits"], capture_output=True, text=True, timeout=10)
         if r.returncode == 0 and r.stdout.strip():
             cc, drv = [x.strip() for x in r.stdout.strip().splitlines()[0].split(",")[:2]]
@@ -553,10 +593,10 @@ def torch_index_for_driver(cfg: dict[str, str]) -> str:
 
 
 def nvidia_mem_mib() -> tuple[int, int, int]:
-    """(used, free, total) MiB for GPU 0 via nvidia-smi, or (0, 0, 0)."""
+    """(used, free, total) MiB for the chosen GPU via nvidia-smi, or (0, 0, 0)."""
     try:
         r = subprocess.run(
-            ["nvidia-smi", "--query-gpu=memory.used,memory.free,memory.total",
+            ["nvidia-smi", "-i", str(_gpu_index()), "--query-gpu=memory.used,memory.free,memory.total",
              "--format=csv,noheader,nounits"],
             capture_output=True, text=True, timeout=10,
         )
@@ -1464,6 +1504,14 @@ def main() -> int:
     if cfg.get("HF_TOKEN"):
         os.environ["HF_TOKEN"] = cfg["HF_TOKEN"]
 
+    # Which GPU: .env GPU_INDEX (default 0). apply_gpu_index() exports it as
+    # GPU_INDEX so every nvidia-smi check below - the profile, the budget, the
+    # free-VRAM preflight - reads the right card. The engine itself is pinned to
+    # it, at spawn time, with CUDA_VISIBLE_DEVICES (see the server Popen below).
+    _idx = apply_gpu_index(cfg)
+    if _idx:
+        info(f"Using GPU {_idx}")
+
     select_environment(cfg)
     scripts = str(VENV_PY.parent)
     os.environ["PATH"] = scripts + os.pathsep + os.environ.get("PATH", "")
@@ -1533,11 +1581,22 @@ def main() -> int:
     # possible answer, and Enter is always the one that ran last. Coming out of
     # setup there is nothing to ask: the size was chosen on the page minutes
     # ago, and the question would be waiting in a console nobody is looking at.
+    if not from_setup:
+        # Which card: asked at every start so it can be changed without a
+        # dedicated command. Enter keeps the last choice; with no terminal (a
+        # tray shortcut, a background start, a scheduled run) it keeps it
+        # silently. Asked before the model menu because that menu's context and
+        # VRAM numbers are planned for the chosen card.
+        import profiles
+        cfg["GPU_INDEX"] = str(profiles.ask_gpu(cfg, auto=not _can_ask()))
     picked = cfg if from_setup else pick_model(cfg)
     if picked is None:
         info("Nothing started.")
         return 0
     cfg = picked
+    # setup (the browser page or the console menu) may have rewritten GPU_INDEX;
+    # re-resolve it, and pin the server we are about to spawn (below) to it.
+    gpu_idx = apply_gpu_index(cfg)
 
     cmd, host, port, gpu_mem, ui, context = server_command(cfg)
 
@@ -1564,6 +1623,11 @@ def main() -> int:
         info("After Ready you will be asked whether to open Cherry Studio.")
     print()
     env = dict(os.environ)
+    # Pin only the model server to the chosen card: with CUDA_VISIBLE_DEVICES set
+    # on this child (and not on the launcher), the engine sees exactly one GPU
+    # as device 0, while every nvidia-smi check above has already run against
+    # the real, physical indices.
+    env["CUDA_VISIBLE_DEVICES"] = str(gpu_idx)
     # On a pipe, Python falls back to the ANSI code page; this side decodes
     # UTF-8, so say so rather than letting an accented path arrive as mojibake.
     env.setdefault("PYTHONIOENCODING", "utf-8")

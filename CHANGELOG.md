@@ -2,6 +2,18 @@
 
 Notable changes to this kit. Newest first.
 
+## 2026-10-14
+
+### Added
+- `GPU_INDEX` (`.env`): load on the second (or Nth) GPU on a multi-GPU box. On
+  a machine with more than one card the launcher **asks** which one to use at
+  every launch - a menu in the terminal or the chooser on the setup page - and
+  writes the answer to `GPU_INDEX`; the launcher pins the engine to that card
+  (`CUDA_VISIBLE_DEVICES`) and every `nvidia-smi` check reads it too, so the
+  profile, `GPU_MEM_GB` and the free-VRAM preflight all describe the card
+  actually used. A single-card machine is never asked; unattended starts keep
+  the current choice. Defaults to GPU 0.
+
 ## Unreleased
 
 ### Fixed

@@ -376,7 +376,8 @@ def _cap_process_vram(gb):
     import torch
     from exllamav3.util import memory as _mem
     torch.cuda.init()
-    total = torch.cuda.get_device_properties(0).total_memory
+    props = torch.cuda.get_device_properties(0)
+    total = props.total_memory
     cap_bytes = int(float(gb) * 1024 ** 3)
     frac = min(max(cap_bytes / total, 0.01), 1.0)
 
@@ -388,6 +389,7 @@ def _cap_process_vram(gb):
     _mem.set_memory_fraction_use = lambda use, device: _pin([device])
     _mem.set_memory_fraction_reserve = lambda reserve, device: _pin([device])
     _mem.unset_memory_fraction = lambda active: _pin(active)
+    print(f" == cuda device: {props.name} ({total / 1024**3:.1f} GB)", flush = True)
     print(f" == VRAM cap: {gb} GB "
           f"({cap_bytes / 1024**3:.2f} GiB, fraction {frac:.4f} of "
           f"{total / 1024**3:.1f} GB device)", flush = True)

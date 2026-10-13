@@ -205,6 +205,14 @@ _load_env() {
 }
 _load_env
 
+# --- which GPU -------------------------------------------------------------
+# GPU_INDEX picks the card by nvidia-smi index (0 = first; see
+# `nvidia-smi --query-gpu=index,name --format=csv`). Every nvidia-smi check
+# below is told -i so the memory budget, profiles and the preflight read that
+# card; the model server alone is pinned to it with CUDA_VISIBLE_DEVICES at the
+# bottom of this script, which makes the chosen card look like device 0 to the
+# engine. Unset = GPU 0 (unchanged default).
+
 # --- which engine, which venv ---------------------------------------------
 # Every DRAFT value runs on ExLlamaV3 1.6.0 in the one .venv, so switching DRAFT
 # back and forth never reinstalls anything. transformers is installed with it:
@@ -442,7 +450,7 @@ CONTEXT_SIZE="${CONTEXT_SIZE:-199936}"
 if [ -n "${GPU_MEM_GB:-}" ]; then
     echo "GPU memory budget: ${GPU_MEM_GB} GB (from ${_gpu_from})"
 else
-    _vram=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | head -1) || true
+    _vram=$(nvidia-smi -i "${GPU_INDEX:-0}" --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | head -1) || true
     if [ "${_vram:-0}" -gt 0 ] 2>/dev/null; then
         # discrete GPU: VRAM minus a little headroom (e.g. 24 GB card -> 22)
         GPU_MEM_GB=$(( _vram / 1024 - 2 ))
@@ -586,7 +594,7 @@ echo "Starting: ${cmd[*]}"
 # launcher before the line below could read the code, and the model switch has
 # never once reached its reload. A non-zero exit is expected here; it is data.
 code=0
-"${cmd[@]}" || code=$?
+CUDA_VISIBLE_DEVICES="${GPU_INDEX:-0}" "${cmd[@]}" || code=$?
 if [ "$code" = "87" ]; then
     echo
     echo "Switching model - reloading with the new settings from .env ..."
